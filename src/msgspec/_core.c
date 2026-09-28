@@ -5815,20 +5815,27 @@ static int
 structmeta_collect_base(StructMetaInfo *info, MsgspecState *mod, PyObject *base) {
     if ((PyTypeObject *)base == &StructMixinType) return 0;
 
-    if (((PyTypeObject *)base)->tp_weaklistoffset) {
-        info->already_has_weakref = true;
-    }
-
-    if (((PyTypeObject *)base)->tp_dictoffset) {
-        info->already_has_dict = true;
-    }
-
     if (!PyType_Check(base)) {
         /* CPython's metaclass conflict check will catch this issue earlier on,
          * but it's still good to have this check in place in case that's ever
          * removed */
         PyErr_SetString(PyExc_TypeError, "All base classes must be types");
         return -1;
+    }
+
+    /* A base that has not been readied yet, which a C extension can expose,
+     * has neither its type dict nor its inherited slots filled in. Ready it
+     * before reading them, as type creation does for its bases. */
+    if (!PyType_HasFeature((PyTypeObject *)base, Py_TPFLAGS_READY)) {
+        if (PyType_Ready((PyTypeObject *)base) < 0) return -1;
+    }
+
+    if (((PyTypeObject *)base)->tp_weaklistoffset) {
+        info->already_has_weakref = true;
+    }
+
+    if (((PyTypeObject *)base)->tp_dictoffset) {
+        info->already_has_dict = true;
     }
 
     if (!ms_is_struct_cls(base)) {
@@ -5839,6 +5846,14 @@ structmeta_collect_base(StructMetaInfo *info, MsgspecState *mod, PyObject *base)
         static const char *attrs[] = {"__init__", "__new__"};
         Py_ssize_t nattrs = 2;
         PyObject *tp_dict = MS_GET_TYPE_DICT((PyTypeObject *)base);
+        if (tp_dict == NULL) {
+            PyErr_Format(
+                PyExc_TypeError,
+                "Cannot read the attributes of base class %R",
+                base
+            );
+            return -1;
+        }
         for (Py_ssize_t i = 0; i < nattrs; i++) {
             if (PyDict_GetItemString(tp_dict, attrs[i]) != NULL) {
                 PyErr_Format(PyExc_TypeError, "Struct base classes cannot define %s", attrs[i]);
