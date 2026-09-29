@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Preserve JSON Schema metadata on annotated `Struct` members of unions.
+
 ## Version 0.22.0 (2026-09-29)
 
 - **BREAKING**: Setting `gc=False` on a struct type that has a weakref slot,
