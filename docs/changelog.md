@@ -3,11 +3,18 @@
 ## Unreleased
 
 - Preserve JSON Schema metadata on annotated `Struct` members of unions.
+- Fix the error state left set when looking up `ClassVar` on a module-level
+  `typing` name that is not the real `typing` module. On CPython builds with
+  assertions enabled this terminated the interpreter. The lookup error now
+  propagates as intended ({issue}`1221`).
+
 - Fix a `NameError` when resolving a generic `TypedDict` defined with PEP 695
   type parameter syntax (`class Foo[T](TypedDict)`) under
   `from __future__ import annotations` on Python 3.12/3.13. Also prevent a
   same-named module-level `TypeVar` from shadowing the PEP 695 type parameter,
   which could silently affect decoding on Python 3.12+ ({pr}`1130`).
+- Fix a typing false negative that allowed assigning attributes
+  to `READONLY` and C level getters
 
 ## Version 0.22.0 (2026-09-29)
 
