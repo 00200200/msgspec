@@ -5020,11 +5020,37 @@ error:
 
 static bool
 is_namedtuple_class(TypeNodeCollectState *state, PyObject *t) {
-    return (
-        PyType_Check(t)
-        && PyType_IsSubtype((PyTypeObject *)t, &PyTuple_Type)
-        && PyObject_HasAttr(t, state->mod->str__fields)
-    );
+    // There's no `NamedTuple` class, it is not really easy to check.
+    // We use structural checks:
+    // 1. It must be a type
+    // 2. It must be a subtype of `tuple`
+    // 3. It must have `_fields` of type `tuple`
+    // 4. It must have `_default_fields` of type `dict`
+    // NOTE: keep in sync with `NamedTupleInfo_Convert`!
+    if (
+        !PyType_Check(t)
+        || !PyType_IsSubtype((PyTypeObject *)t, &PyTuple_Type)
+    ) {
+        return false;
+    }
+
+    PyObject *fields = PyObject_GetAttr(t, state->mod->str__fields);
+    if (fields == NULL) {
+        PyErr_Clear();
+        return false;
+    }
+    if (!PyTuple_CheckExact(fields)) return false;
+    Py_DECREF(fields);
+
+    PyObject *defaults = PyObject_GetAttr(t, state->mod->str__field_defaults);
+    if (defaults == NULL) {
+        PyErr_Clear();
+        return false;
+    }
+;
+    bool result = (bool)PyDict_CheckExact(defaults);
+    Py_DECREF(defaults);
+    return result;
 }
 
 static bool
@@ -9132,6 +9158,7 @@ static PyTypeObject DataclassInfo_Type = {
 
 static PyObject *
 NamedTupleInfo_Convert(PyObject *obj) {
+    // NOTE: keep in sync with `is_namedtuple_class`!
     MsgspecState *mod = msgspec_get_global_state();
     NamedTupleInfo *info = NULL;
     PyObject *annotations = NULL, *cls = NULL, *fields = NULL;
@@ -9160,6 +9187,10 @@ NamedTupleInfo_Convert(PyObject *obj) {
     if (fields == NULL) goto cleanup;
     defaults = PyObject_GetAttr(cls, mod->str__field_defaults);
     if (defaults == NULL) goto cleanup;
+
+    // It is checked in `is_namedtuple_class`:
+    assert(PyTuple_CheckExact(fields));
+    assert(PyDict_CheckExact(defaults));
 
     /* Allocate and zero-out a new NamedTupleInfo object */
     Py_ssize_t nfields = PyTuple_GET_SIZE(fields);
@@ -14287,6 +14318,23 @@ json_encode_decimal(EncoderState *self, PyObject *obj)
         self->in_decimal_callable = false;
         Py_DECREF(temp);
         return out;
+    }
+
+    if (self->decimal_format == DECIMAL_FORMAT_NUMBER) {
+        // We can't format `Inf` / `Nan` / `sNan` as numbers, only as strings:
+        PyObject *is_finite = PyObject_CallMethod(obj, "is_finite", NULL);
+        if (is_finite == NULL) return -1;
+        int is_finite_int = PyObject_IsTrue(is_finite);
+        Py_DECREF(is_finite);
+        if (!is_finite_int) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "Cannot encode as a number an non-finite value of a decimal: %R; "
+                "use `decimal_format='string' or a custom callable`",
+                obj
+            );
+            return -1;
+        }
     }
 
     temp = PyObject_Str(obj);
