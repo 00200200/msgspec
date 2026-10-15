@@ -1657,7 +1657,7 @@ static PyTypeObject Raw_Type = {
     .tp_name = "msgspec.Raw",
     .tp_doc = Raw__doc__,
     .tp_basicsize = sizeof(Raw),
-    .tp_itemsize = sizeof(char),
+    .tp_itemsize = 0,
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = Raw_new,
     .tp_dealloc = (destructor) Raw_dealloc,
@@ -6138,18 +6138,20 @@ static int
 structmeta_is_classvar(
     StructMetaInfo *info, MsgspecState *mod, PyObject *ann, PyObject **module_ns
 ) {
-    PyTypeObject *ann_type = Py_TYPE(ann);
-    if (ann_type == &PyUnicode_Type) {
+    if (MS_LIKELY(ann == mod->typing_classvar)) return 1;
+    else if (PyUnicode_CheckExact(ann)) {
         Py_ssize_t ann_len;
         const char *ann_buf = unicode_str_and_size(ann, &ann_len);
+        if (ann_buf == NULL) return -1;
         if (ann_len < 8) return 0;
         if (memcmp(ann_buf, "ClassVar", 8) == 0) {
             if (ann_len != 8 && ann_buf[8] != '[') return 0;
             if (*module_ns == NULL) {
                 *module_ns = structmeta_get_module_ns(mod, info);
             }
-            if (*module_ns == NULL) return 0;
+            if (*module_ns == NULL) return -1;
             PyObject *temp = PyDict_GetItemString(*module_ns, "ClassVar");
+            if (temp == NULL) return 0;
             return temp == mod->typing_classvar;
         }
         if (ann_len < 15) return 0;
@@ -6158,7 +6160,7 @@ structmeta_is_classvar(
             if (*module_ns == NULL) {
                 *module_ns = structmeta_get_module_ns(mod, info);
             }
-            if (*module_ns == NULL) return 0;
+            if (*module_ns == NULL) return -1;
             PyObject *temp = PyDict_GetItemString(*module_ns, "typing");
             if (temp == NULL) return 0;
             temp = PyObject_GetAttrString(temp, "ClassVar");
@@ -6168,19 +6170,14 @@ structmeta_is_classvar(
             return status;
         }
     }
-    else {
-        if (ann == mod->typing_classvar) {
-            return 1;
-        }
-        else if ((PyObject *)ann_type == mod->typing_generic_alias) {
-            PyObject *temp = PyObject_GetAttr(ann, mod->str___origin__);
-            if (temp == NULL) return -1;
-            int status = temp == mod->typing_classvar;
-            Py_DECREF(temp);
-            return status;
-        }
-        return 0;
+    else if ((PyObject *)Py_TYPE(ann) == mod->typing_generic_alias) {
+        PyObject *temp = PyObject_GetAttr(ann, mod->str___origin__);
+        if (temp == NULL) return -1;
+        int status = temp == mod->typing_classvar;
+        Py_DECREF(temp);
+        return status;
     }
+
     return 0;
 }
 
@@ -6229,7 +6226,9 @@ structmeta_collect_fields(StructMetaInfo *info, MsgspecState *mod, bool kwonly) 
         }
 
         PyObject *invalid_field_names[] = {
-            mod->str___weakref__, mod->str___dict__, mod->str___msgspec_cached_hash__
+            mod->str___weakref__,
+            mod->str___dict__,
+            mod->str___msgspec_cached_hash__
         };
         for (int i = 0; i < 3; i++) {
             if (PyUnicode_Compare(field, invalid_field_names[i]) == 0) {
@@ -6245,6 +6244,7 @@ structmeta_collect_fields(StructMetaInfo *info, MsgspecState *mod, bool kwonly) 
         int status = structmeta_is_classvar(info, mod, value, &module_ns);
         if (status == 1) continue;
         if (status == -1) goto error;
+        assert(status == 0 && !PyErr_Occurred());
 
         /* If the field is new, add it to slots */
         if (PyDict_GetItem(info->defaults_lk, field) == NULL) {
@@ -9004,9 +9004,9 @@ DataclassInfo_Convert(PyObject *obj) {
         TypeNode *type = TypeNode_Convert(PyTuple_GET_ITEM(field, 1));
         if (type == NULL) goto cleanup;
         /* If field has a default factory, set extra flag bit */
-        if (PyObject_IsTrue(PyTuple_GET_ITEM(field, 2))) {
-            type->types |= MS_EXTRA_FLAG;
-        }
+        int has_df = PyObject_IsTrue(PyTuple_GET_ITEM(field, 2));
+        if (has_df == -1) goto cleanup;
+        if (has_df) type->types |= MS_EXTRA_FLAG;
         info->fields[i].type = type;
         info->fields[i].key = PyTuple_GET_ITEM(field, 0);
         Py_INCREF(info->fields[i].key);
@@ -9025,7 +9025,7 @@ cleanup:
             * occasions. */
             PyObject *err_type, *err_value, *err_tb;
             PyErr_Fetch(&err_type, &err_value, &err_tb);
-            PyObject_DelAttr(obj, mod->str___msgspec_cache__);
+            (void)PyObject_DelAttr(obj, mod->str___msgspec_cache__);
             PyErr_Restore(err_type, err_value, err_tb);
         }
     }
@@ -10410,6 +10410,7 @@ static bool
 ms_passes_big_int_constraints(PyObject *obj, TypeNode *type, PathNode *path) {
 #if PY314_PLUS
     /* obj is always a PyLong here, so PyLong_GetSign can't fail */
+    assert(PyLong_CheckExact(obj));
     int sign = 0;
     (void)PyLong_GetSign(obj, &sign);
     bool neg = sign < 0;
@@ -10438,9 +10439,11 @@ ms_passes_big_int_constraints(PyObject *obj, TypeNode *type, PathNode *path) {
         PyObject *remainder = PyNumber_Remainder(obj, base);
         Py_DECREF(base);
         if (remainder == NULL) return false;
-        long iremainder = PyLong_AsLong(remainder);
+        long long iremainder = PyLong_AsLongLong(remainder);
         Py_DECREF(remainder);
         if (iremainder != 0) {
+            // There was an overflow error, do not hide it:
+            if (iremainder == -1 && PyErr_Occurred()) return false;
             _err_int_constraint(
                 "Expected `int` that's a multiple of %lld%U", c, path
             );
@@ -14326,7 +14329,8 @@ json_encode_decimal(EncoderState *self, PyObject *obj)
         if (is_finite == NULL) return -1;
         int is_finite_int = PyObject_IsTrue(is_finite);
         Py_DECREF(is_finite);
-        if (!is_finite_int) {
+        if (is_finite_int == -1) return -1;
+        if (is_finite_int == 0) {
             PyErr_Format(
                 PyExc_ValueError,
                 "Cannot encode as a number an non-finite value of a decimal: %R; "
@@ -23272,12 +23276,14 @@ PyInit__core(void)
     if (temp_obj == NULL) return NULL;
     st->uuid_safeuuid_unknown = PyObject_GetAttrString(temp_obj, "unknown");
     Py_DECREF(temp_obj);
+    Py_DECREF(temp_module);
     if (st->uuid_safeuuid_unknown == NULL) return NULL;
 
     /* decimal module imports */
     temp_module = PyImport_ImportModule("decimal");
     if (temp_module == NULL) return NULL;
     st->DecimalType = PyObject_GetAttrString(temp_module, "Decimal");
+    Py_DECREF(temp_module);
     if (st->DecimalType == NULL) return NULL;
 
     /* Get the re.compile function */
